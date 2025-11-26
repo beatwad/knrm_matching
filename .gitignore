@@ -1,0 +1,10 @@
+data/glove_6B/*
+data/QQP/*
+__pycache__*
+
+*.npy
+*.bin
+*.json
+*.docx
+*.docx#
+*.env
