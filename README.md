@@ -29,6 +29,8 @@ A document matching system using Kernel Neural Ranking Model (KNRM) and GloVe em
    - `knrm_mlp.bin`
    - `QQP/dev.tsv` (for testing)
 
+   Download the data from [here](https://dl.fbaipublicfiles.com/glue/data/QQP-clean.zip) and place it in the `data/QQP/` directory.
+
 3. **Environment Variables:**
    Create a `.env` file or export:
    ```env
