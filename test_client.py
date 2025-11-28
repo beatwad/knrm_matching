@@ -1,9 +1,30 @@
 import requests
 import time
 import sys
-import json
+import pandas as pd
 
 BASE_URL = "http://0.0.0.0:11000"
+DATA_PATH = "data/QQP/dev.tsv"
+
+
+def load_data():
+    print(f"Loading data from {DATA_PATH}...")
+    try:
+        df = pd.read_csv(DATA_PATH, sep="\t")
+        # Filter is_duplicate = 1
+        df = df[df["is_duplicate"] == 1]
+        df = df.dropna(subset=["question1", "question2", "qid1"])
+
+        # Create documents dict: qid1 -> question1
+        # Convert qid1 to string for JSON compatibility
+        documents = pd.Series(df.question1.values, index=df.qid1.astype(str)).to_dict()
+        print(f"Loaded {len(documents)} unique documents from duplicate pairs.")
+
+        return df, documents
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        sys.exit(1)
+
 
 def test_ping():
     print(f"Testing /ping endpoint at {BASE_URL}/ping...")
@@ -20,117 +41,179 @@ def test_ping():
         print("Server is not reachable.")
         return None
 
-def test_update_index():
+
+def test_update_index(documents):
     print("\nTesting /update_index endpoint...")
-    # Create some dummy documents
-    documents = {
-        "doc1": "The quick brown fox jumps over the lazy dog",
-        "doc2": "Python is a powerful programming language used for web development and data science",
-        "doc3": "Deep learning is a subset of machine learning based on artificial neural networks",
-        "doc4": "Flask is a micro web framework written in Python",
-        "doc5": "Natural language processing enables computers to understand human language"
-    }
-    
+
     payload = {"documents": documents}
     try:
         response = requests.post(f"{BASE_URL}/update_index", json=payload)
         response.raise_for_status()
         data = response.json()
         print(f"Update index response: {data}")
-        
-        if data.get("status") == "ok" and data.get("index_size") == len(documents):
-            print("Index update successful.")
+
+        if data.get("status") == "ok":
+            # We don't strictly check size equality here because duplicates in source might have been merged
+            print(f"Index update successful. Size: {data.get('index_size')}")
             return True
         else:
-            print("Index update failed or size mismatch.")
+            print("Index update failed.")
             return False
     except Exception as e:
         print(f"Update index failed: {e}")
         return False
 
-def test_query():
+
+def test_query(df, N_queries):
     print("\nTesting /query endpoint...")
-    # Queries: valid English, and one Spanish to test language detection
-    queries = [
-        "programming in python", 
-        "neural networks and deep learning", 
-        "quick brown fox", 
-        "Hola mundo como estas"
-    ]
+
+    # Select N_queries random rows from the filtered dataframe
+    if len(df) < N_queries:
+        print("Not enough data to sample N queries.")
+        return False
+
+    sample = df.sample(N_queries)
+    queries = sample["question2"].tolist()
+    expected_ids = sample["qid1"].astype(str).tolist()
 
     payload = {"queries": queries}
     try:
         response = requests.post(f"{BASE_URL}/query", json=payload)
         response.raise_for_status()
         data = response.json()
-        
+
         suggestions = data.get("suggestions")
         lang_check = data.get("lang_check")
-        
-        print(f"Language check results: {lang_check}")
-        
+
         if len(suggestions) != len(queries):
             print(f"Error: Expected {len(queries)} suggestions, got {len(suggestions)}")
             return False
-            
+
         all_passed = True
-        for i, q in enumerate(queries):
+        found_n_queries = 0
+        rejected_count = 0
+
+        for i, (q, expected_id) in enumerate(zip(queries, expected_ids)):
             print(f"\nQuery: '{q}'")
-            is_en = lang_check[i]
-            print(f"Detected as English: {is_en}")
-            
-            if is_en:
-                res = suggestions[i]
-                if not isinstance(res, list):
-                     print("Error: Suggestions should be a list of tuples.")
-                     all_passed = False
-                     continue
-                print(f"Top suggestions (count {len(res)}):")
-                for doc_id, doc_text in res:
-                    print(f" - {doc_id}: {doc_text}")
+            print(f"Expected ID: {expected_id}")
+
+            # Check language if present
+            if lang_check and not lang_check[i]:
+                print("Warning: Query detected as not English (unexpected for QQP).")
+
+            res = suggestions[i]
+            if res is None:
+                print("Error: Suggestions is None.")
+                rejected_count += 1
+                continue
+
+            if not isinstance(res, list):
+                print("Error: Suggestions should be a list of tuples.")
+                all_passed = False
+                continue
+
+            # Found IDs in top suggestions
+            found_ids = [str(r[0]) for r in res]
+            print(f"Top suggestions IDs: {found_ids}")
+
+            if expected_id in found_ids:
+                print("SUCCESS: Expected ID found in suggestions.")
+                found_n_queries += 1
             else:
-                print("No suggestions expected (language check failed).")
-                if suggestions[i] is not None:
-                    print("Error: Suggestions should be None for failed lang check.")
-                    all_passed = False
+                print("FAILURE: Expected ID NOT found in suggestions.")
+
+        accuracy = found_n_queries / N_queries
+        print(f"Found {found_n_queries} out of {N_queries} queries.")
+        print(f"Accuracy: {accuracy * 100:.2f}%")
+
+        if accuracy < 0.5:
+            print("FAILURE: Accuracy is less than 50%.")
+            all_passed = False
+
+        reject_ratio = rejected_count / N_queries
+        print(f"Rejected {rejected_count} out of {N_queries} queries.")
+        print(f"Reject ratio: {reject_ratio * 100:.2f}%")
+        if reject_ratio > 0.05:
+            print("FAILURE: Reject ratio is greater than 5%.")
+            all_passed = False
 
         return all_passed
     except Exception as e:
         print(f"Query failed: {e}")
         return False
 
-def main():
-    print("--- Starting Test Client ---")
-    print("Waiting for server to be ready...")
-    
-    # Wait loop for server initialization
-    max_retries = 20
-    for i in range(max_retries):
-        status = test_ping()
-        if status == "ok":
-            print("Server is ready and initialized!")
-            break
-        elif status == "in_progress":
-            print("Server is initializing (helper loading)... waiting 2s")
-            time.sleep(2)
+
+def test_non_english_queries():
+    print("\nTesting /query endpoint with non-English queries...")
+    non_english_queries = [
+        "Привет, как дела?",
+        "Hola, ¿cómo estás?",
+        "Bonjour, comment ça va?",
+        "Hallo, wie geht es dir?",
+        "Ciao, come stai?",
+        "Olá, como vai?",
+        "你好吗",
+        "お元気ですか",
+        "안녕하세요",
+        "مرحباً، كيف حالك؟",
+    ]
+    payload = {"queries": non_english_queries}
+    try:
+        response = requests.post(f"{BASE_URL}/query", json=payload)
+        response.raise_for_status()
+        data = response.json()
+        lang_check = data.get("lang_check")
+        if lang_check is None:
+            print("Error: lang_check field missing in response.")
+            return False
+        rejected_count = sum(1 for check in lang_check if not check)
+        print(f"Rejected {rejected_count} out of {len(non_english_queries)} non-English queries.")
+        if rejected_count >= 9:
+            print("SUCCESS: Non-English filtering works as expected.")
+            return True
         else:
-            print("Server not reachable yet... waiting 2s")
-            time.sleep(2)
+            print("FAILURE: Too many non-English queries were accepted.")
+            return False
+    except Exception as e:
+        print(f"Non-English query test failed: {e}")
+        return False
+
+
+print("--- Starting Test Client ---")
+
+# Load data first
+df, documents = load_data()
+
+print("Waiting for server to be ready...")
+
+# Wait loop for server initialization
+max_retries = 60
+for i in range(max_retries):
+    status = test_ping()
+    if status == "ok":
+        print("Server is ready and initialized!")
+        break
+    elif status == "in_progress":
+        print("Server is initializing (helper loading)... waiting 2s")
+        time.sleep(2)
     else:
-        print("Timeout: Server failed to become ready or is not running.")
-        print("Please make sure you run 'python solution.py' in a separate terminal.")
-        sys.exit(1)
+        print("Server not reachable yet... waiting 2s")
+        time.sleep(2)
+else:
+    print("Timeout: Server failed to become ready or is not running.")
+    print("Please make sure you run 'python solution.py' in a separate terminal.")
+    sys.exit(1)
 
-    if not test_update_index():
-        print("Aborting tests due to update_index failure.")
-        sys.exit(1)
-        
-    if not test_query():
-        print("Tests failed during query execution.")
-        sys.exit(1)
-        
-    print("\n--- All tests passed successfully! ---")
+if not test_update_index(documents):
+    print("Aborting tests due to update_index failure.")
+    sys.exit(1)
 
-if __name__ == "__main__":
-    main()
+if not test_query(df, N_queries=100):
+    print("Tests failed during query execution.")
+    sys.exit(1)
 
+if not test_non_english_queries():
+    print("Tests failed during non-English query execution.")
+    sys.exit(1)
+
+print("\n--- All tests passed successfully! ---")

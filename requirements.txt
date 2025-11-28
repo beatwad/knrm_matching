@@ -1,0 +1,9 @@
+flask
+torch
+numpy
+faiss-cpu
+lingua-language-detector
+python-dotenv
+pandas
+requests
+
